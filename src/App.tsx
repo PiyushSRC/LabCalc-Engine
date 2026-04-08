@@ -80,6 +80,28 @@ export default function App() {
       return;
     }
 
+    if (upperCmd.startsWith('SET STD ')) {
+      const newStd = parseFloat(upperCmd.replace('SET STD ', ''));
+      if (!isNaN(newStd) && newStd > 0) {
+        setStdOD(Math.round(newStd * 100) / 100);
+        setLastAction(`STD O.D. SET TO: ${(Math.round(newStd * 100) / 100).toFixed(2)}`);
+      } else {
+        setLastAction('ERROR: INVALID STD VALUE');
+      }
+      return;
+    }
+
+    if (upperCmd.startsWith('SET CONC ')) {
+      const newConc = parseFloat(upperCmd.replace('SET CONC ', ''));
+      if (!isNaN(newConc) && newConc > 0) {
+        setConcentration(newConc);
+        setLastAction(`CONC SET TO: ${newConc}`);
+      } else {
+        setLastAction('ERROR: INVALID CONC VALUE');
+      }
+      return;
+    }
+
     if (upperCmd === 'EXPORT PDF') {
       setShowExport(true);
       setLastAction('EXPORTING PDF...');
@@ -367,7 +389,7 @@ export default function App() {
               type="text"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
-              placeholder="Enter O.D. or command (POST, NORMAL, SET ID [X], DELETE)..."
+              placeholder="Enter O.D. or command (POST, NORMAL, SET ID/STD/CONC, DELETE)..."
               className="w-full bg-white border-2 border-[#141414] p-5 rounded-2xl text-xl font-mono focus:outline-none shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] focus:shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] focus:translate-x-[2px] focus:translate-y-[2px] transition-all"
             />
             <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-3">
@@ -432,6 +454,8 @@ export default function App() {
             { cmd: 'POST', desc: 'Switch to SRC Mode' },
             { cmd: 'NORMAL', desc: 'Switch to Normal Mode' },
             { cmd: 'SET ID [N]', desc: 'Jump to specific ID' },
+            { cmd: 'SET STD [N]', desc: 'Change Std O.D.' },
+            { cmd: 'SET CONC [N]', desc: 'Change Concentration' },
             { cmd: 'DELETE', desc: 'Remove last entry' },
             { cmd: 'DELETE ALL', desc: 'Reset to Setup' },
           ].map(item => (
