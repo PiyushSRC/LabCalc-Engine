@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Beaker, FileText, Trash2, ArrowRight, Settings2, Download, RefreshCw, Printer, Check, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateMarkdown } from './utils/generateMarkdown';
@@ -38,6 +38,9 @@ export default function App() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [editingHeader, setEditingHeader] = useState<'std' | 'conc' | null>(null);
+  const [headerEditValue, setHeaderEditValue] = useState('');
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; rowId: number } | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const reportRef = useRef<HTMLDivElement>(null);
@@ -95,6 +98,109 @@ export default function App() {
     const result = (sampleOD / stdOD) * concentration;
     return Math.round(result * 100) / 100;
   };
+
+  const showToast = useCallback((message: string, type: 'success' | 'error') => {
+    if (toastTimeout.current) clearTimeout(toastTimeout.current);
+    setToast({ message, type });
+    toastTimeout.current = setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  const displayList = useMemo(() => {
+    if (rows.length === 0) return [] as Array<{ type: 'row'; row: SampleRow; idx: number } | { type: 'ghost'; id: number }>;
+    const minId = rows[0].id;
+    const maxId = rows[rows.length - 1].id;
+    const result: Array<{ type: 'row'; row: SampleRow; idx: number } | { type: 'ghost'; id: number }> = [];
+    let rowIdx = 0;
+    for (let id = minId; id <= maxId; id++) {
+      if (rowIdx < rows.length && rows[rowIdx].id === id) {
+        result.push({ type: 'row', row: rows[rowIdx], idx: rowIdx });
+        rowIdx++;
+      } else {
+        result.push({ type: 'ghost', id });
+      }
+    }
+    return result;
+  }, [rows]);
+
+  const selectedRow = useMemo(() => {
+    if (mode === 'NORMAL') return rows.find((r: SampleRow) => r.id === currentId) || null;
+    return rows[postIndex] || null;
+  }, [mode, rows, currentId, postIndex]);
+
+  const deleteRowById = useCallback((id: number) => {
+    const idx = rows.findIndex((r: SampleRow) => r.id === id);
+    if (idx === -1) return;
+    setRows((prev: SampleRow[]) => prev.filter(r => r.id !== id));
+    if (mode === 'POST' && idx <= postIndex) {
+      setPostIndex((prev: number) => Math.max(0, prev - 1));
+    }
+    showToast(`Sample ${id} deleted`, 'success');
+    setLastAction(`DELETED ID ${id}`);
+  }, [rows, mode, postIndex, showToast]);
+
+  const toggleMode = useCallback(() => {
+    if (mode === 'NORMAL') {
+      setMode('POST');
+      const firstUnfilled = rows.findIndex((r: SampleRow) => r.postOD === null);
+      if (firstUnfilled !== -1) setPostIndex(firstUnfilled);
+      setLastAction('MODE: SRC (24HR)');
+    } else {
+      setMode('NORMAL');
+      setLastAction('MODE: NORMAL');
+    }
+  }, [mode, rows]);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    if (!setupComplete) return;
+    const handler = (e: KeyboardEvent) => {
+      const inputEmpty = inputValue === '';
+      const inputFocused = document.activeElement === inputRef.current;
+
+      if (e.key === 'Delete' && inputEmpty && selectedRow) {
+        e.preventDefault();
+        deleteRowById(selectedRow.id);
+        return;
+      }
+      if (e.key === 'Tab' && inputEmpty && inputFocused) {
+        e.preventDefault();
+        toggleMode();
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (editingHeader) { setEditingHeader(null); return; }
+        if (contextMenu) { setContextMenu(null); return; }
+        if (inputValue) { setInputValue(''); return; }
+        inputRef.current?.blur();
+        return;
+      }
+      if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && inputEmpty && rows.length > 0) {
+        e.preventDefault();
+        const currentIdx = selectedRow ? rows.findIndex((r: SampleRow) => r.id === selectedRow.id) : -1;
+        let newIdx: number;
+        if (e.key === 'ArrowUp') {
+          newIdx = currentIdx <= 0 ? 0 : currentIdx - 1;
+        } else {
+          newIdx = currentIdx === -1 ? 0 : Math.min(rows.length - 1, currentIdx + 1);
+        }
+        const target = rows[newIdx];
+        if (target) {
+          setCurrentId(target.id);
+          if (mode === 'POST') setPostIndex(newIdx);
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [setupComplete, inputValue, selectedRow, rows, mode, editingHeader, contextMenu, deleteRowById, toggleMode]);
+
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [contextMenu]);
 
   const armDeleteAllReset = () => {
     if (deleteAllTimeout.current) clearTimeout(deleteAllTimeout.current);
@@ -301,12 +407,6 @@ export default function App() {
     }
   };
 
-  const showToast = useCallback((message: string, type: 'success' | 'error') => {
-    if (toastTimeout.current) clearTimeout(toastTimeout.current);
-    setToast({ message, type });
-    toastTimeout.current = setTimeout(() => setToast(null), 3000);
-  }, []);
-
   const getReportData = useCallback((): LabReportData => ({
     concentration,
     stdOD,
@@ -474,8 +574,70 @@ export default function App() {
           <div>
             <h1 className="text-sm font-bold uppercase tracking-tighter">LabCalc Engine v1.0</h1>
             <div className="flex gap-4 text-[10px] font-mono opacity-60">
-              <span>STD: {stdOD?.toFixed(2)}</span>
-              <span>CONC: {concentration?.toFixed(2)}</span>
+              {editingHeader === 'std' ? (
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  autoFocus
+                  value={headerEditValue}
+                  onChange={(e) => setHeaderEditValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const v = parseFloat(headerEditValue);
+                      if (Number.isFinite(v) && v > 0) {
+                        setStdOD(Math.round(v * 100) / 100);
+                        setLastAction(`STD O.D. SET TO: ${(Math.round(v * 100) / 100).toFixed(2)}`);
+                      } else {
+                        showToast('Standard must be a positive number', 'error');
+                      }
+                      setEditingHeader(null);
+                    } else if (e.key === 'Escape') {
+                      setEditingHeader(null);
+                    }
+                  }}
+                  onBlur={() => setEditingHeader(null)}
+                  className="w-16 border border-[#141414] px-1 rounded font-mono text-[10px]"
+                />
+              ) : (
+                <span
+                  onClick={() => { setEditingHeader('std'); setHeaderEditValue(stdOD?.toString() ?? ''); }}
+                  className="cursor-pointer hover:bg-[#141414]/5 px-1 rounded"
+                  title="Click to edit"
+                >STD: {stdOD?.toFixed(2)}</span>
+              )}
+              {editingHeader === 'conc' ? (
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  autoFocus
+                  value={headerEditValue}
+                  onChange={(e) => setHeaderEditValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const v = parseFloat(headerEditValue);
+                      if (Number.isFinite(v) && v > 0) {
+                        setConcentration(v);
+                        setLastAction(`CONC SET TO: ${v}`);
+                      } else {
+                        showToast('Concentration must be a positive number', 'error');
+                      }
+                      setEditingHeader(null);
+                    } else if (e.key === 'Escape') {
+                      setEditingHeader(null);
+                    }
+                  }}
+                  onBlur={() => setEditingHeader(null)}
+                  className="w-16 border border-[#141414] px-1 rounded font-mono text-[10px]"
+                />
+              ) : (
+                <span
+                  onClick={() => { setEditingHeader('conc'); setHeaderEditValue(concentration?.toString() ?? ''); }}
+                  className="cursor-pointer hover:bg-[#141414]/5 px-1 rounded"
+                  title="Click to edit"
+                >CONC: {concentration?.toFixed(2)}</span>
+              )}
             </div>
           </div>
         </div>
@@ -483,9 +645,13 @@ export default function App() {
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-bold uppercase tracking-widest opacity-40">Status:</span>
-            <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded ${mode === 'NORMAL' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-              {mode} MODE
-            </span>
+            <button
+              onClick={toggleMode}
+              title="Click to toggle mode (Tab key)"
+              className={`text-[10px] font-bold uppercase tracking-widest px-3 py-1 rounded cursor-pointer hover:opacity-80 transition-opacity ${mode === 'NORMAL' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}
+            >
+              {mode} MODE ⇄
+            </button>
           </div>
           <div className="h-8 w-px bg-[#141414]/10" />
           <button 
@@ -507,7 +673,7 @@ export default function App() {
               type="text"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
-              placeholder="Enter O.D. or command (POST, NORMAL, SET ID/STD/CONC, DELETE)..."
+              placeholder="Enter O.D. or command (Tab=switch mode, Del=delete row, ↑↓=navigate)..."
               className="w-full bg-white border-2 border-[#141414] p-5 rounded-2xl text-xl font-mono focus:outline-none shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] focus:shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] focus:translate-x-[2px] focus:translate-y-[2px] transition-all"
             />
             <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-3">
@@ -530,6 +696,11 @@ export default function App() {
                   </motion.span>
                 )}
               </AnimatePresence>
+              {selectedRow && (
+                <div className="bg-blue-50 text-blue-700 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-widest">
+                  Editing: ID {selectedRow.id}
+                </div>
+              )}
               <div className="bg-[#141414]/5 px-2 py-1 rounded text-[10px] font-mono opacity-40">
                 ENTER TO SUBMIT
               </div>
@@ -539,12 +710,13 @@ export default function App() {
 
         {/* Data Grid */}
         <div className="bg-white rounded-2xl border-2 border-[#141414] overflow-hidden shadow-[8px_8px_0px_0px_rgba(20,20,20,1)]">
-          <div className="grid grid-cols-5 border-b-2 border-[#141414] bg-[#141414] text-white">
+          <div className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr_60px] border-b-2 border-[#141414] bg-[#141414] text-white">
             <div className="p-4 text-[11px] font-bold uppercase tracking-widest border-r border-white/20">Sample ID</div>
             <div className="p-4 text-[11px] font-bold uppercase tracking-widest border-r border-white/20">Normal: O.D.</div>
             <div className="p-4 text-[11px] font-bold uppercase tracking-widest border-r border-white/20">Normal: Calc</div>
             <div className="p-4 text-[11px] font-bold uppercase tracking-widest border-r border-white/20">SRC: O.D.</div>
-            <div className="p-4 text-[11px] font-bold uppercase tracking-widest">SRC: Calc</div>
+            <div className="p-4 text-[11px] font-bold uppercase tracking-widest border-r border-white/20">SRC: Calc</div>
+            <div className="p-4 text-[11px] font-bold uppercase tracking-widest"></div>
           </div>
 
           <div className="max-h-[60vh] overflow-y-auto">
@@ -554,10 +726,39 @@ export default function App() {
                 <p className="font-mono text-sm uppercase tracking-widest">Awaiting data input...</p>
               </div>
             ) : (
-              rows.map((row, idx) => (
+              <AnimatePresence>
+              {displayList.map((item) => {
+                if (item.type === 'ghost') {
+                  return (
+                    <motion.div
+                      key={`ghost-${item.id}`}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      onClick={() => {
+                        setCurrentId(item.id);
+                        inputRef.current?.focus();
+                        setLastAction(`READY TO ADD ID ${item.id}`);
+                      }}
+                      className={`grid grid-cols-[1fr_1fr_1fr_1fr_1fr_60px] border-b border-dashed border-[#141414]/20 hover:bg-blue-50 cursor-pointer bg-[#141414]/[0.02] ${currentId === item.id ? 'bg-blue-50 ring-1 ring-blue-300 ring-inset' : ''}`}
+                    >
+                      <div className="p-4 font-mono text-sm border-r border-[#141414]/10 flex items-center gap-2 text-[#141414]/50 italic">
+                        {currentId === item.id && <span className="text-blue-600">▸</span>}
+                        + {item.id}
+                      </div>
+                      <div className="p-4 font-mono text-xs text-[#141414]/40 italic flex items-center" style={{ gridColumn: 'span 5 / span 5' }}>
+                        Click to add ID {item.id} — or type a value while selected
+                      </div>
+                    </motion.div>
+                  );
+                }
+                const { row, idx } = item;
+                const isSelected = (mode === 'NORMAL' && currentId === row.id) || (mode === 'POST' && postIndex === idx);
+                return (
                 <motion.div
                   initial={{ opacity: 0, y: 5 }}
                   animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
                   key={row.id}
                   onClick={() => {
                     setCurrentId(row.id);
@@ -565,15 +766,35 @@ export default function App() {
                     setLastAction(`SELECTED ID ${row.id}`);
                     inputRef.current?.focus();
                   }}
-                  className={`grid grid-cols-5 border-b border-[#141414]/10 hover:bg-[#E4E3E0]/30 transition-colors cursor-pointer ${mode === 'POST' && postIndex === idx ? 'bg-amber-50' : ''} ${mode === 'NORMAL' && currentId === row.id ? 'bg-blue-50 ring-1 ring-blue-300' : ''}`}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setCurrentId(row.id);
+                    if (mode === 'POST') setPostIndex(idx);
+                    setContextMenu({ x: e.clientX, y: e.clientY, rowId: row.id });
+                  }}
+                  className={`group grid grid-cols-[1fr_1fr_1fr_1fr_1fr_60px] border-b border-[#141414]/10 hover:bg-[#E4E3E0]/30 transition-colors cursor-pointer ${mode === 'POST' && postIndex === idx ? 'bg-amber-50' : ''} ${mode === 'NORMAL' && currentId === row.id ? 'bg-blue-50 ring-1 ring-blue-300 ring-inset' : ''}`}
                 >
-                  <div className="p-4 font-mono text-sm border-r border-[#141414]/10">{row.id}</div>
+                  <div className="p-4 font-mono text-sm border-r border-[#141414]/10 flex items-center gap-2">
+                    {isSelected && <span className="text-blue-600">▸</span>}
+                    {row.id}
+                  </div>
                   <div className="p-4 font-mono text-sm border-r border-[#141414]/10">{row.normalOD?.toFixed(2) || '-'}</div>
                   <div className="p-4 font-mono text-sm border-r border-[#141414]/10 font-bold">{row.normalCalc?.toFixed(2) || '-'}</div>
                   <div className="p-4 font-mono text-sm border-r border-[#141414]/10">{row.postOD?.toFixed(2) || '-'}</div>
-                  <div className="p-4 font-mono text-sm font-bold">{row.postCalc?.toFixed(2) || '-'}</div>
+                  <div className="p-4 font-mono text-sm font-bold border-r border-[#141414]/10">{row.postCalc?.toFixed(2) || '-'}</div>
+                  <div className="p-2 flex items-center justify-center">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); deleteRowById(row.id); }}
+                      className="opacity-0 group-hover:opacity-100 hover:bg-red-100 hover:text-red-600 p-1.5 rounded transition-all"
+                      title="Delete row"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
                 </motion.div>
-              ))
+                );
+              })}
+              </AnimatePresence>
             )}
           </div>
         </div>
@@ -722,6 +943,37 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+      {/* Right-click Context Menu */}
+      {contextMenu && (
+        <div
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          className="fixed z-[55] bg-white border-2 border-[#141414] rounded-lg shadow-xl py-1 min-w-[160px]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              const row = rows.find((r: SampleRow) => r.id === contextMenu.rowId);
+              if (row) {
+                setCurrentId(row.id);
+                const idx = rows.findIndex((r: SampleRow) => r.id === row.id);
+                if (mode === 'POST') setPostIndex(idx);
+                inputRef.current?.focus();
+              }
+              setContextMenu(null);
+            }}
+            className="w-full text-left px-4 py-2 text-xs font-bold uppercase tracking-widest hover:bg-[#E4E3E0]/50"
+          >
+            Edit
+          </button>
+          <button
+            onClick={() => { deleteRowById(contextMenu.rowId); setContextMenu(null); }}
+            className="w-full text-left px-4 py-2 text-xs font-bold uppercase tracking-widest text-red-600 hover:bg-red-50"
+          >
+            Delete
+          </button>
+        </div>
+      )}
+
       {/* Toast Notification */}
       <AnimatePresence>
         {toast && (
