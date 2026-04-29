@@ -37,10 +37,51 @@ export default function App() {
   const [showExport, setShowExport] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [hydrated, setHydrated] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const reportRef = useRef<HTMLDivElement>(null);
   const toastTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deleteAllTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingDeleteAllRef = useRef<boolean>(false);
+
+  const STORAGE_KEY = 'labcalc-state-v1';
+
+  // Load from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const s = JSON.parse(saved);
+        if (s.stdOD !== undefined) setStdOD(s.stdOD);
+        if (s.concentration !== undefined) setConcentration(s.concentration);
+        if (s.solvent !== undefined) setSolvent(s.solvent);
+        if (s.normalDate !== undefined) setNormalDate(s.normalDate);
+        if (s.srcDate !== undefined) setSrcDate(s.srcDate);
+        if (Array.isArray(s.rows)) setRows(s.rows);
+        if (s.mode) setMode(s.mode);
+        if (typeof s.currentId === 'number') setCurrentId(s.currentId);
+        if (typeof s.postIndex === 'number') setPostIndex(s.postIndex);
+        if (typeof s.setupComplete === 'boolean') setSetupComplete(s.setupComplete);
+      }
+    } catch (err) {
+      console.error('Failed to restore state:', err);
+    }
+    setHydrated(true);
+  }, []);
+
+  // Save to localStorage on state change
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        stdOD, concentration, solvent, normalDate, srcDate,
+        rows, mode, currentId, postIndex, setupComplete,
+      }));
+    } catch (err) {
+      console.error('Failed to save state:', err);
+    }
+  }, [hydrated, stdOD, concentration, solvent, normalDate, srcDate, rows, mode, currentId, postIndex, setupComplete]);
 
   useEffect(() => {
     if (setupComplete) {
@@ -55,12 +96,24 @@ export default function App() {
     return Math.round(result * 100) / 100;
   };
 
+  const armDeleteAllReset = () => {
+    if (deleteAllTimeout.current) clearTimeout(deleteAllTimeout.current);
+    deleteAllTimeout.current = setTimeout(() => { pendingDeleteAllRef.current = false; }, 5000);
+  };
+
   const handleCommand = (cmd: string) => {
     const upperCmd = cmd.trim().toUpperCase();
 
+    // Any command other than DELETE ALL disarms the confirmation
+    if (pendingDeleteAllRef.current && upperCmd !== 'DELETE ALL') {
+      pendingDeleteAllRef.current = false;
+      if (deleteAllTimeout.current) clearTimeout(deleteAllTimeout.current);
+    }
+
     if (upperCmd === 'POST') {
       setMode('POST');
-      setPostIndex(0);
+      const firstUnfilled = rows.findIndex((r: SampleRow) => r.postOD === null);
+      if (firstUnfilled !== -1) setPostIndex(firstUnfilled);
       setLastAction('MODE: SRC (24HR)');
       return;
     }
@@ -73,9 +126,19 @@ export default function App() {
 
     if (upperCmd.startsWith('SET ID ')) {
       const newId = parseInt(upperCmd.replace('SET ID ', ''));
-      if (!isNaN(newId)) {
+      if (!isNaN(newId) && newId > 0) {
+        if (mode === 'POST') {
+          const idx = rows.findIndex((r: SampleRow) => r.id === newId);
+          if (idx === -1) {
+            setLastAction(`ERROR: ID ${newId} NOT FOUND IN POST MODE`);
+            return;
+          }
+          setPostIndex(idx);
+        }
         setCurrentId(newId);
         setLastAction(`ID SET TO: ${newId}`);
+      } else {
+        setLastAction('ERROR: INVALID ID');
       }
       return;
     }
@@ -109,6 +172,15 @@ export default function App() {
     }
 
     if (upperCmd === 'DELETE ALL') {
+      if (!pendingDeleteAllRef.current) {
+        pendingDeleteAllRef.current = true;
+        armDeleteAllReset();
+        setLastAction('TYPE "DELETE ALL" AGAIN TO CONFIRM');
+        return;
+      }
+      // Confirmed
+      if (deleteAllTimeout.current) clearTimeout(deleteAllTimeout.current);
+      pendingDeleteAllRef.current = false;
       setRows([]);
       setStdOD(null);
       setConcentration(null);
@@ -119,7 +191,27 @@ export default function App() {
       setCurrentId(1);
       setPostIndex(0);
       setSetupComplete(false);
+      try { localStorage.removeItem(STORAGE_KEY); } catch {}
       setLastAction('RESET TO SETUP');
+      return;
+    }
+
+    if (upperCmd.startsWith('DELETE ID ')) {
+      const targetId = parseInt(upperCmd.replace('DELETE ID ', ''));
+      if (!isNaN(targetId)) {
+        const existingIdx = rows.findIndex((r: SampleRow) => r.id === targetId);
+        if (existingIdx !== -1) {
+          setRows((prev: SampleRow[]) => prev.filter(r => r.id !== targetId));
+          if (mode === 'POST' && existingIdx < postIndex) {
+            setPostIndex((prev: number) => Math.max(0, prev - 1));
+          }
+          setLastAction(`DELETED ID ${targetId}`);
+        } else {
+          setLastAction(`ERROR: ID ${targetId} NOT FOUND`);
+        }
+      } else {
+        setLastAction('ERROR: INVALID ID');
+      }
       return;
     }
 
@@ -146,20 +238,33 @@ export default function App() {
     // Handle O.D. entry
     const rawOd = parseFloat(cmd);
     if (!isNaN(rawOd)) {
+      if (rawOd < 0) {
+        setLastAction('ERROR: O.D. CANNOT BE NEGATIVE');
+        return;
+      }
       const od = Math.round(rawOd * 100) / 100;
       const calc = calculateValue(od);
       
       if (mode === 'NORMAL') {
-        const newRow: SampleRow = {
-          id: currentId,
-          normalOD: od,
-          normalCalc: calc,
-          postOD: null,
-          postCalc: null
-        };
-        setRows(prev => [...prev, newRow]);
-        setCurrentId(prev => prev + 1);
-        setLastAction(`ADDED ID ${currentId}`);
+        const existingIdx = rows.findIndex((r: SampleRow) => r.id === currentId);
+        if (existingIdx !== -1) {
+          const newRows = [...rows];
+          newRows[existingIdx].normalOD = od;
+          newRows[existingIdx].normalCalc = calc;
+          setRows(newRows);
+          setLastAction(`UPDATED ID ${currentId} — SET ID FOR NEXT`);
+        } else {
+          const newRow: SampleRow = {
+            id: currentId,
+            normalOD: od,
+            normalCalc: calc,
+            postOD: null,
+            postCalc: null
+          };
+          setRows((prev: SampleRow[]) => [...prev, newRow].sort((a, b) => a.id - b.id));
+          setCurrentId(prev => prev + 1);
+          setLastAction(`ADDED ID ${currentId}`);
+        }
       } else {
         if (postIndex < rows.length) {
           const newRows = [...rows];
@@ -177,8 +282,13 @@ export default function App() {
 
   const handleSetup = (e: React.FormEvent) => {
     e.preventDefault();
-    if (stdOD !== null && concentration !== null) {
+    if (
+      stdOD !== null && Number.isFinite(stdOD) && stdOD > 0 &&
+      concentration !== null && Number.isFinite(concentration) && concentration > 0
+    ) {
       setSetupComplete(true);
+    } else {
+      showToast('Standard O.D. and Concentration must be positive numbers', 'error');
     }
   };
 
@@ -272,11 +382,15 @@ export default function App() {
                 <input
                   type="number"
                   step="0.01"
+                  min="0.01"
                   required
                   autoFocus
                   className="w-full bg-[#E4E3E0]/30 border-b-2 border-[#141414] p-2 focus:outline-none focus:bg-[#E4E3E0]/50 transition-colors text-sm font-mono"
                   placeholder="0.50"
-                  onChange={(e) => setStdOD(Math.round(parseFloat(e.target.value) * 100) / 100)}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    setStdOD(Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
+                  }}
                 />
               </div>
               <div>
@@ -286,10 +400,14 @@ export default function App() {
                 <input
                   type="number"
                   step="0.01"
+                  min="0.01"
                   required
                   className="w-full bg-[#E4E3E0]/30 border-b-2 border-[#141414] p-2 focus:outline-none focus:bg-[#E4E3E0]/50 transition-colors text-sm font-mono"
                   placeholder="100"
-                  onChange={(e) => setConcentration(parseFloat(e.target.value))}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    setConcentration(Number.isFinite(v) ? v : null);
+                  }}
                 />
               </div>
             </div>
@@ -400,7 +518,13 @@ export default function App() {
                     initial={{ opacity: 0, x: 10 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, x: -10 }}
-                    className="text-[10px] font-bold uppercase tracking-widest text-emerald-600 bg-emerald-50 px-2 py-1 rounded"
+                    className={`text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded ${
+                      lastAction.startsWith('ERROR')
+                        ? 'text-red-600 bg-red-50'
+                        : lastAction.includes('CONFIRM')
+                          ? 'text-amber-700 bg-amber-50'
+                          : 'text-emerald-600 bg-emerald-50'
+                    }`}
                   >
                     {lastAction}
                   </motion.span>
@@ -431,11 +555,17 @@ export default function App() {
               </div>
             ) : (
               rows.map((row, idx) => (
-                <motion.div 
+                <motion.div
                   initial={{ opacity: 0, y: 5 }}
                   animate={{ opacity: 1, y: 0 }}
-                  key={row.id} 
-                  className={`grid grid-cols-5 border-b border-[#141414]/10 hover:bg-[#E4E3E0]/30 transition-colors ${mode === 'POST' && postIndex === idx ? 'bg-amber-50' : ''}`}
+                  key={row.id}
+                  onClick={() => {
+                    setCurrentId(row.id);
+                    if (mode === 'POST') setPostIndex(idx);
+                    setLastAction(`SELECTED ID ${row.id}`);
+                    inputRef.current?.focus();
+                  }}
+                  className={`grid grid-cols-5 border-b border-[#141414]/10 hover:bg-[#E4E3E0]/30 transition-colors cursor-pointer ${mode === 'POST' && postIndex === idx ? 'bg-amber-50' : ''} ${mode === 'NORMAL' && currentId === row.id ? 'bg-blue-50 ring-1 ring-blue-300' : ''}`}
                 >
                   <div className="p-4 font-mono text-sm border-r border-[#141414]/10">{row.id}</div>
                   <div className="p-4 font-mono text-sm border-r border-[#141414]/10">{row.normalOD?.toFixed(2) || '-'}</div>
@@ -457,6 +587,7 @@ export default function App() {
             { cmd: 'SET STD [N]', desc: 'Change Std O.D.' },
             { cmd: 'SET CONC [N]', desc: 'Change Concentration' },
             { cmd: 'DELETE', desc: 'Remove last entry' },
+            { cmd: 'DELETE ID [N]', desc: 'Delete specific ID' },
             { cmd: 'DELETE ALL', desc: 'Reset to Setup' },
           ].map(item => (
             <div key={item.cmd} className="bg-white p-3 rounded-xl border border-[#141414]/10 flex items-center justify-between">
