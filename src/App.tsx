@@ -47,6 +47,7 @@ export default function App() {
   const toastTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const deleteAllTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDeleteAllRef = useRef<boolean>(false);
+  const lastTouchedRowId = useRef<number | null>(null);
 
   const STORAGE_KEY = 'labcalc-state-v1';
 
@@ -56,8 +57,12 @@ export default function App() {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const s = JSON.parse(saved);
-        if (s.stdOD !== undefined) setStdOD(s.stdOD);
-        if (s.concentration !== undefined) setConcentration(s.concentration);
+        const validStd = typeof s.stdOD === 'number' && Number.isFinite(s.stdOD) && s.stdOD > 0;
+        const validConc = typeof s.concentration === 'number' && Number.isFinite(s.concentration) && s.concentration > 0;
+        const wasSetup = typeof s.setupComplete === 'boolean' && s.setupComplete;
+
+        if (validStd) setStdOD(s.stdOD);
+        if (validConc) setConcentration(s.concentration);
         if (s.solvent !== undefined) setSolvent(s.solvent);
         if (s.normalDate !== undefined) setNormalDate(s.normalDate);
         if (s.srcDate !== undefined) setSrcDate(s.srcDate);
@@ -65,7 +70,14 @@ export default function App() {
         if (s.mode) setMode(s.mode);
         if (typeof s.currentId === 'number') setCurrentId(s.currentId);
         if (typeof s.postIndex === 'number') setPostIndex(s.postIndex);
-        if (typeof s.setupComplete === 'boolean') setSetupComplete(s.setupComplete);
+
+        if (wasSetup && validStd && validConc) {
+          setSetupComplete(true);
+        } else if (wasSetup) {
+          // Corrupt std/conc — force re-setup; rows/dates remain so user doesn't lose data
+          console.warn('Hydration: invalid std/conc, returning to setup');
+          showToast('Saved standard/concentration invalid — please re-enter', 'error');
+        }
       }
     } catch (err) {
       console.error('Failed to restore state:', err);
@@ -92,6 +104,13 @@ export default function App() {
     }
   }, [setupComplete, mode]);
 
+  // Auto-scroll the most recently touched row into view
+  useEffect(() => {
+    if (lastTouchedRowId.current === null) return;
+    const el = document.querySelector(`[data-row-id="${lastTouchedRowId.current}"]`);
+    if (el) (el as HTMLElement).scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [rows]);
+
   const calculateValue = (sampleOD: number) => {
     if (!stdOD || stdOD === 0 || !concentration) return 0;
     // Formula: (O.D. of Sample / O.D. of Standard) * Concentration
@@ -105,11 +124,21 @@ export default function App() {
     toastTimeout.current = setTimeout(() => setToast(null), 3000);
   }, []);
 
-  const displayList = useMemo(() => {
-    if (rows.length === 0) return [] as Array<{ type: 'row'; row: SampleRow; idx: number } | { type: 'ghost'; id: number }>;
+  const MAX_GHOSTS = 50;
+  const { displayList, ghostsSkipped } = useMemo(() => {
+    type Item = { type: 'row'; row: SampleRow; idx: number } | { type: 'ghost'; id: number };
+    if (rows.length === 0) return { displayList: [] as Item[], ghostsSkipped: false };
     const minId = rows[0].id;
     const maxId = rows[rows.length - 1].id;
-    const result: Array<{ type: 'row'; row: SampleRow; idx: number } | { type: 'ghost'; id: number }> = [];
+    const ghostCount = (maxId - minId + 1) - rows.length;
+    if (ghostCount > MAX_GHOSTS) {
+      // Too sparse — skip ghost rows to avoid huge render
+      return {
+        displayList: rows.map((row, idx) => ({ type: 'row' as const, row, idx })),
+        ghostsSkipped: true,
+      };
+    }
+    const result: Item[] = [];
     let rowIdx = 0;
     for (let id = minId; id <= maxId; id++) {
       if (rowIdx < rows.length && rows[rowIdx].id === id) {
@@ -119,13 +148,20 @@ export default function App() {
         result.push({ type: 'ghost', id });
       }
     }
-    return result;
+    return { displayList: result, ghostsSkipped: false };
   }, [rows]);
 
   const selectedRow = useMemo(() => {
     if (mode === 'NORMAL') return rows.find((r: SampleRow) => r.id === currentId) || null;
     return rows[postIndex] || null;
   }, [mode, rows, currentId, postIndex]);
+
+  // Auto-scroll selection into view (arrow nav, click, SET ID, etc.)
+  useEffect(() => {
+    if (!selectedRow) return;
+    const el = document.querySelector(`[data-row-id="${selectedRow.id}"]`);
+    if (el) (el as HTMLElement).scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [selectedRow]);
 
   const deleteRowById = useCallback((id: number) => {
     const idx = rows.findIndex((r: SampleRow) => r.id === id);
@@ -137,6 +173,22 @@ export default function App() {
     showToast(`Sample ${id} deleted`, 'success');
     setLastAction(`DELETED ID ${id}`);
   }, [rows, mode, postIndex, showToast]);
+
+  const commitHeaderEdit = useCallback((field: 'std' | 'conc') => {
+    const v = parseFloat(headerEditValue);
+    if (Number.isFinite(v) && v > 0) {
+      if (field === 'std') {
+        setStdOD(Math.round(v * 100) / 100);
+        setLastAction(`STD O.D. SET TO: ${(Math.round(v * 100) / 100).toFixed(2)}`);
+      } else {
+        setConcentration(v);
+        setLastAction(`CONC SET TO: ${v}`);
+      }
+    } else {
+      showToast(`${field === 'std' ? 'Standard' : 'Concentration'} must be a positive number`, 'error');
+    }
+    setEditingHeader(null);
+  }, [headerEditValue, showToast]);
 
   const toggleMode = useCallback(() => {
     if (mode === 'NORMAL') {
@@ -154,8 +206,16 @@ export default function App() {
   useEffect(() => {
     if (!setupComplete) return;
     const handler = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      // Skip all shortcuts when focus is inside any other input/textarea (e.g., inline header edit)
+      if (
+        (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement) &&
+        activeEl !== inputRef.current
+      ) {
+        return;
+      }
       const inputEmpty = inputValue === '';
-      const inputFocused = document.activeElement === inputRef.current;
+      const inputFocused = activeEl === inputRef.current;
 
       if (e.key === 'Delete' && inputEmpty && selectedRow) {
         e.preventDefault();
@@ -358,7 +418,11 @@ export default function App() {
           newRows[existingIdx].normalOD = od;
           newRows[existingIdx].normalCalc = calc;
           setRows(newRows);
-          setLastAction(`UPDATED ID ${currentId} — SET ID FOR NEXT`);
+          lastTouchedRowId.current = currentId;
+          setLastAction(`UPDATED ID ${currentId}`);
+          // Advance cursor past the highest existing row so the next entry creates a new row
+          const maxId = rows[rows.length - 1].id;
+          setCurrentId(Math.max(currentId + 1, maxId + 1));
         } else {
           const newRow: SampleRow = {
             id: currentId,
@@ -368,7 +432,9 @@ export default function App() {
             postCalc: null
           };
           setRows((prev: SampleRow[]) => [...prev, newRow].sort((a, b) => a.id - b.id));
-          setCurrentId(prev => prev + 1);
+          lastTouchedRowId.current = currentId;
+          const oldMaxId = rows.length > 0 ? rows[rows.length - 1].id : 0;
+          setCurrentId(Math.max(currentId + 1, oldMaxId + 1));
           setLastAction(`ADDED ID ${currentId}`);
         }
       } else {
@@ -377,6 +443,7 @@ export default function App() {
           newRows[postIndex].postOD = od;
           newRows[postIndex].postCalc = calc;
           setRows(newRows);
+          lastTouchedRowId.current = rows[postIndex].id;
           setPostIndex(prev => prev + 1);
           setLastAction(`UPDATED ID ${rows[postIndex].id} (POST)`);
         } else {
@@ -584,19 +651,12 @@ export default function App() {
                   onChange={(e) => setHeaderEditValue(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
-                      const v = parseFloat(headerEditValue);
-                      if (Number.isFinite(v) && v > 0) {
-                        setStdOD(Math.round(v * 100) / 100);
-                        setLastAction(`STD O.D. SET TO: ${(Math.round(v * 100) / 100).toFixed(2)}`);
-                      } else {
-                        showToast('Standard must be a positive number', 'error');
-                      }
-                      setEditingHeader(null);
+                      commitHeaderEdit('std');
                     } else if (e.key === 'Escape') {
                       setEditingHeader(null);
                     }
                   }}
-                  onBlur={() => setEditingHeader(null)}
+                  onBlur={() => commitHeaderEdit('std')}
                   className="w-16 border border-[#141414] px-1 rounded font-mono text-[10px]"
                 />
               ) : (
@@ -616,19 +676,12 @@ export default function App() {
                   onChange={(e) => setHeaderEditValue(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
-                      const v = parseFloat(headerEditValue);
-                      if (Number.isFinite(v) && v > 0) {
-                        setConcentration(v);
-                        setLastAction(`CONC SET TO: ${v}`);
-                      } else {
-                        showToast('Concentration must be a positive number', 'error');
-                      }
-                      setEditingHeader(null);
+                      commitHeaderEdit('conc');
                     } else if (e.key === 'Escape') {
                       setEditingHeader(null);
                     }
                   }}
-                  onBlur={() => setEditingHeader(null)}
+                  onBlur={() => commitHeaderEdit('conc')}
                   className="w-16 border border-[#141414] px-1 rounded font-mono text-[10px]"
                 />
               ) : (
@@ -696,17 +749,27 @@ export default function App() {
                   </motion.span>
                 )}
               </AnimatePresence>
-              {selectedRow && (
+              {selectedRow ? (
                 <div className="bg-blue-50 text-blue-700 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-widest">
                   Editing: ID {selectedRow.id}
                 </div>
-              )}
+              ) : mode === 'NORMAL' ? (
+                <div className="bg-[#141414]/5 text-[#141414]/60 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-widest">
+                  Next: ID {currentId}
+                </div>
+              ) : null}
               <div className="bg-[#141414]/5 px-2 py-1 rounded text-[10px] font-mono opacity-40">
                 ENTER TO SUBMIT
               </div>
             </div>
           </form>
         </div>
+
+        {ghostsSkipped && (
+          <div className="mb-4 px-4 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold uppercase tracking-widest rounded-lg">
+            Large id gaps detected — ghost rows hidden. Use SET ID N to jump to a specific id.
+          </div>
+        )}
 
         {/* Data Grid */}
         <div className="bg-white rounded-2xl border-2 border-[#141414] overflow-hidden shadow-[8px_8px_0px_0px_rgba(20,20,20,1)]">
@@ -729,6 +792,7 @@ export default function App() {
               <AnimatePresence>
               {displayList.map((item) => {
                 if (item.type === 'ghost') {
+                  if (mode === 'POST') return null;
                   return (
                     <motion.div
                       key={`ghost-${item.id}`}
@@ -760,6 +824,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, x: -20 }}
                   key={row.id}
+                  data-row-id={row.id}
                   onClick={() => {
                     setCurrentId(row.id);
                     if (mode === 'POST') setPostIndex(idx);
