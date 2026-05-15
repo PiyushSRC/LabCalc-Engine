@@ -253,9 +253,9 @@ async function buildPDFDocument(report: LabReportData): Promise<jsPDF> {
     // ── Per-column overrides ──
     columnStyles: {
       0: { cellWidth: colWidths[0], fontStyle: 'normal', textColor: COLOR.bodyText },
-      1: { cellWidth: colWidths[1], textColor: COLOR.mutedText },
+      1: { cellWidth: colWidths[1], textColor: COLOR.bodyText },
       2: { cellWidth: colWidths[2], textColor: COLOR.blue, fontStyle: 'bold' },
-      3: { cellWidth: colWidths[3], textColor: COLOR.mutedText },
+      3: { cellWidth: colWidths[3], textColor: COLOR.bodyText },
       4: { cellWidth: colWidths[4], textColor: COLOR.green, fontStyle: 'bold' },
     },
 

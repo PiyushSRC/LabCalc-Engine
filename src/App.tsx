@@ -954,9 +954,9 @@ export default function App() {
                     {rows.map((row) => (
                       <tr key={row.id} className="border-b border-[#141414]/10">
                         <td className="p-4 text-center font-mono text-sm border-r border-[#141414]/10">{row.id}</td>
-                        <td className="p-4 text-center font-mono text-sm border-r border-[#141414]/10 text-[#141414]/60">{row.normalOD?.toFixed(2) || '-'}</td>
+                        <td className="p-4 text-center font-mono text-sm border-r border-[#141414]/10">{row.normalOD?.toFixed(2) || '-'}</td>
                         <td className="p-4 text-center font-mono text-sm border-r border-[#141414]/10 font-bold text-blue-600">{row.normalCalc?.toFixed(2) || '-'}</td>
-                        <td className="p-4 text-center font-mono text-sm border-r border-[#141414]/10 text-[#141414]/60">{row.postOD?.toFixed(2) || '-'}</td>
+                        <td className="p-4 text-center font-mono text-sm border-r border-[#141414]/10">{row.postOD?.toFixed(2) || '-'}</td>
                         <td className="p-4 text-center font-mono text-sm font-bold text-emerald-600">{row.postCalc?.toFixed(2) || '-'}</td>
                       </tr>
                     ))}
